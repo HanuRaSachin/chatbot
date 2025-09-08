@@ -1,193 +1,167 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-from sklearn import preprocessing
-from sklearn.tree import DecisionTreeClassifier, _tree
+import google.generativeai as genai
+from googletrans import Translator
 import warnings
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-# Ignore warnings for a cleaner output
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="AI Health Assistant",
+    page_icon="🩺",
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
+
+# Suppress warnings for a cleaner interface
 warnings.filterwarnings("ignore")
 
+# --- Google Gemini API Configuration ---
+try:
+    # Use Streamlit's secrets management for the API key
+    GEMINI_API_KEY = st.secrets[AIzaSyDbvA_b9nXFEnSva2Q3pGW2H_H6ZpF8KD8]
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except (KeyError, Exception):
+    st.error("🔴 **Error:** Google API Key not found. Please add it to your Streamlit secrets.", icon="🚨")
+    st.stop()
 
-# --- App Configuration ---
-st.set_page_config(page_title="Healtho Diagnosis Bot", page_icon="🩺", layout="centered")
 
-# --- Model and Data Loading (Cached for performance) ---
+# --- Translator Initialization ---
 @st.cache_resource
-def load_model_and_data():
+def get_translator():
+    return Translator()
+
+translator = get_translator()
+
+
+# --- Core Functions ---
+def get_ai_response(prompt, language="en"):
     """
-    Loads data, trains the decision tree model, and prepares necessary components.
-    This function is cached, so it only runs once when the app starts.
+    Generates a response from the Gemini model and translates it.
+    Includes a crucial safety disclaimer for health-related queries.
     """
+    # Safety disclaimer to prepend to every health-related AI response
+    disclaimer = (
+        "**Disclaimer:** I am an AI assistant, not a medical professional. "
+        "This information is for informational purposes only and should not be considered medical advice. "
+        "Please consult with a qualified healthcare provider for any health concerns or before making any medical decisions."
+    )
     try:
-        # Load datasets
-        training = pd.read_csv('Training.csv')
+        full_prompt = (
+            "You are a helpful AI health assistant. Provide informative and safe advice. "
+            f"Here is the user's query: '{prompt}'"
+        )
+        response = model.generate_content(full_prompt)
         
-        # Get feature columns (all columns except the last one, 'prognosis')
-        cols = training.columns[:-1]
-        
-        # Prepare data
-        x = training[cols]
-        y = training['prognosis']
-        
-        # Group data for symptom lookup later
-        reduced_data = training.groupby(training['prognosis']).max()
-        
-        # Label encoding for the target variable 'prognosis'
-        le = preprocessing.LabelEncoder()
-        le.fit(y)
-        y_encoded = le.transform(y)
-        
-        # Train the Decision Tree Classifier
-        clf = DecisionTreeClassifier()
-        clf.fit(x, y_encoded)
-        
-        # Return the original training dataframe as well for visualization
-        return clf, le, cols, reduced_data, training
-    except FileNotFoundError as e:
-        st.error(f"Error loading data files: {e}. Make sure 'Training.csv' is in the same directory as the app.")
-        return None, None, None, None, None
+        # Combine the original response with the disclaimer
+        final_response_text = f"{response.text}\n\n---\n\n{disclaimer}"
 
-# Load all necessary objects
-clf, le, cols, reduced_data, training_df = load_model_and_data()
+        if language != "en":
+            return translate_text(final_response_text, language)
+        return final_response_text
 
-# Check if model loading was successful before proceeding
-if clf is not None:
-    tree_ = clf.tree_
-    feature_names = [cols[i] if i != _tree.TREE_UNDEFINED else "undefined!" for i in tree_.feature]
+    except Exception as e:
+        return f"Error: Could not get a response from the AI model. Details: {str(e)}"
 
-# --- Session State Initialization ---
-def initialize_session_state():
-    """Initializes session state variables if they don't exist."""
-    if 'node' not in st.session_state:
-        st.session_state.node = 0
-    if 'symptoms_present' not in st.session_state:
-        st.session_state.symptoms_present = []
-    if 'page' not in st.session_state:
-        st.session_state.page = 'home'
-
-# --- UI Functions ---
-def display_question(node):
-    """Displays the current symptom question and buttons."""
-    symptom_name = feature_names[node].replace('_', ' ')
-    st.subheader(f"Do you have {symptom_name}?", divider='rainbow')
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("Yes", use_container_width=True, type="primary"):
-            st.session_state.symptoms_present.append(feature_names[node])
-            st.session_state.node = tree_.children_right[node]
-            st.rerun()
-            
-    with col2:
-        if st.button("No", use_container_width=True):
-            st.session_state.node = tree_.children_left[node]
-            st.rerun()
-
-def display_symptom_chart(disease, training_df):
-    """Creates and displays a bar chart for symptom prevalence."""
-    st.subheader("Symptom Prevalence for this Condition", divider='gray')
-    st.info("This chart shows the most common symptoms associated with the predicted condition, based on the training data.")
-    
-    # Filter symptoms for the predicted disease from the original training data
-    symptoms = training_df.loc[training_df['prognosis'] == disease, training_df.columns[:-1]]
-    
-    if not symptoms.empty:
-        # Calculate the count of each symptom
-        symptom_counts = symptoms.sum().sort_values(ascending=False)
-        top_symptoms = symptom_counts[symptom_counts > 0].head(10) # Get top 10 non-zero symptoms
-
-        if not top_symptoms.empty:
-            # Create the plot
-            fig, ax = plt.subplots(figsize=(10, 5))
-            sns.barplot(x=top_symptoms.values, y=top_symptoms.index, palette='viridis', ax=ax)
-            ax.set_title(f'Most Common Symptoms for {disease}', fontsize=16)
-            ax.set_xlabel('Prevalence Count in Training Data', fontsize=12)
-            plt.xticks(fontsize=10)
-            plt.yticks(fontsize=10)
-            
-            # Use Streamlit to display the plot
-            st.pyplot(fig)
-        else:
-            st.write("No specific symptom data to visualize for this condition.")
-    else:
-        st.write("Could not retrieve symptom data for visualization.")
-
-
-def display_report(training_df):
-    """Displays the final diagnosis report."""
-    # Get disease from the leaf node value
-    present_disease_encoded = tree_.value[st.session_state.node][0].argmax()
-    present_disease = le.inverse_transform([present_disease_encoded])[0]
-
-    st.header("🩺 Healtho Diagnosis Report", divider='blue')
-    st.success(f"**Predicted Disease:** {present_disease}")
-    
-    # Display symptoms the user confirmed
-    confirmed_symptoms_str = ", ".join([s.replace('_', ' ') for s in st.session_state.symptoms_present])
-    st.write(f"**Symptoms You Confirmed:** {confirmed_symptoms_str if confirmed_symptoms_str else 'None'}")
-    
-    # Display other possible symptoms for the diagnosed disease
-    st.subheader("Other Possible Symptoms:")
-    symptoms_given = reduced_data.columns[reduced_data.loc[present_disease].values[0].nonzero()]
-    for i, symptom in enumerate(symptoms_given):
-        st.markdown(f"- {symptom.replace('_', ' ')}")
-    
-    # Doctor consultation recommendation
+def translate_text(text, dest_language="en"):
+    """Translates text to the specified destination language."""
     try:
-        import csv
-        with open('doc_consult.csv', 'r') as f:
-            read = csv.reader(f)
-            consult = {rows[0]: int(rows[1]) for rows in read}
+        if text and text.strip():
+            return translator.translate(text, dest=dest_language).text
+        return ""
+    except Exception as e:
+        return f"Translation Error: {str(e)}"
+
+# --- Main Application UI ---
+def main():
+    # Language selection in the sidebar
+    languages = {
+        "English": "en", "Hindi": "hi", "Spanish": "es", "French": "fr", "German": "de",
+        "Chinese (Simplified)": "zh-CN", "Arabic": "ar", "Russian": "ru", "Japanese": "ja"
+    }
+    st.sidebar.title("⚙️ " + translate_text("Settings", "en"))
+    selected_language_name = st.sidebar.selectbox(
+        translate_text("Select Language:", "en"),
+        list(languages.keys())
+    )
+    language_code = languages[selected_language_name]
+
+    # Main page title and introduction
+    st.title("🩺 " + translate_text("AI Health Assistant", language_code))
+    st.write(translate_text(
+        "Welcome! I am here to provide general health information and analyze your symptoms. "
+        "Please remember, I am not a substitute for a real doctor.", language_code
+    ))
+
+    # Tabbed interface for different features
+    tab1, tab2 = st.tabs([
+        " S" + translate_text("ymptom Checker", language_code),
+        " " + translate_text("General Health Q&A", language_code)
+    ])
+
+    # == Symptom Checker Tab ==
+    with tab1:
+        st.header(translate_text("Symptom Analysis Form", language_code))
+        st.info(translate_text(
+            "Please provide your details and symptoms below for a preliminary AI-powered analysis.", language_code
+        ))
+
+        with st.form("symptom_form"):
+            st.subheader(translate_text("Basic Information", language_code))
+            name = st.text_input(translate_text("Name:", language_code))
+            age = st.number_input(translate_text("Age:", language_code), min_value=0, max_value=120, step=1)
+            gender = st.selectbox(translate_text("Gender:", language_code),
+                                  [translate_text("Male", language_code),
+                                   translate_text("Female", language_code),
+                                   translate_text("Prefer not to say", language_code)])
+
+            st.subheader(translate_text("Describe Your Symptoms", language_code))
+            symptoms_text = st.text_area(
+                translate_text("Please describe your main symptoms, when they started, and their severity:", language_code),
+                height=150
+            )
+
+            submitted = st.form_submit_button(translate_text("Analyze My Symptoms", language_code))
+
+            if submitted:
+                if not symptoms_text or not name or age <= 0:
+                    st.error(translate_text("Please fill in all the fields before submitting.", language_code))
+                else:
+                    with st.spinner(translate_text("AI is analyzing your symptoms...", language_code)):
+                        # Construct a detailed prompt for the AI
+                        analysis_prompt = (
+                            f"Analyze the following health case:\n"
+                            f"- Patient Name: {name}\n"
+                            f"- Age: {age}\n"
+                            f"- Gender: {gender}\n"
+                            f"- Described Symptoms: {symptoms_text}\n\n"
+                            "Based on these symptoms, please provide:\n"
+                            "1. A list of possible conditions (from most likely to least likely).\n"
+                            "2. A brief, simple explanation for each possible condition.\n"
+                            "3. A suggested course of action (e.g., rest, hydration, or see a doctor).\n"
+                        )
+                        analysis_response = get_ai_response(analysis_prompt, language_code)
+                        st.divider()
+                        st.subheader(translate_text("AI Analysis Result", language_code))
+                        st.markdown(analysis_response)
+
+    # == General Health Q&A Tab ==
+    with tab2:
+        st.header(translate_text("Ask a General Health Question", language_code))
+        st.info(translate_text(
+            "You can ask about diseases, treatments, nutrition, fitness, or any other health-related topic.", language_code
+        ))
         
-        risk_level = consult.get(present_disease, 0)
-        st.subheader("Doctor Consultation Advice:", divider='gray')
-        if risk_level > 50:
-            st.warning("**High Risk:** You should consult a doctor as soon as possible.")
-        else:
-            st.info("**Moderate Risk:** You may want to consult a doctor for a professional opinion.")
-    except (FileNotFoundError, Exception):
-        st.error("Could not load doctor consultation advice. Make sure 'doc_consult.csv' is present.")
+        user_query = st.text_input(translate_text("Your question:", language_code), key="qa_input")
+        
+        if user_query:
+            with st.spinner(translate_text("Finding an answer...", language_code)):
+                # Translate query to English for the AI model for better consistency
+                english_query = translate_text(user_query, "en")
+                ai_response = get_ai_response(english_query, language_code)
+                st.divider()
+                st.subheader(translate_text("AI Assistant's Response:", language_code))
+                st.markdown(ai_response)
 
-    # Display the symptom prevalence chart
-    display_symptom_chart(present_disease, training_df)
-
-    if st.button("Start New Diagnosis"):
-        # Reset the session state to start over
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-
-# --- Main App Logic ---
-# Initialize session state for the first run
-initialize_session_state()
-
-st.title("Healtho: Your Personal Health Assistant")
-
-# Main router: directs to the correct page based on session state
-if clf is not None:
-    if st.session_state.page == 'home':
-        st.write("Welcome! I'm here to help with a preliminary health diagnosis based on your symptoms.")
-        st.write("Please answer the questions to the best of your ability. This is not a substitute for professional medical advice.")
-        if st.button("Start Diagnosis", type="primary"):
-            st.session_state.page = 'diagnosis'
-            st.rerun()
-
-    elif st.session_state.page == 'diagnosis':
-        current_node = st.session_state.node
-        # Check if it's a leaf node (diagnosis) or an internal node (question)
-        if tree_.feature[current_node] != _tree.TREE_UNDEFINED:
-            display_question(current_node)
-        else:
-            st.session_state.page = 'report'
-            st.rerun()
-
-    elif st.session_state.page == 'report':
-        display_report(training_df)
-else:
-    st.error("Application cannot start because the model failed to load. Please check the data files.")
+if __name__ == "__main__":
+    main()
 
